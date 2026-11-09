@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import type { Fork, Topic } from '../types'
+import type { Fork, ParentLink, Topic } from '../types'
 import {
   answerExcerpt,
   applyAgents,
@@ -10,15 +10,20 @@ import {
   fallbackTitle,
   forkExcerpt,
   forkName,
+  forkPrompt,
   forksLabel,
   nextPage,
   pageOf,
+  parentLabel,
+  parentName,
+  parentOf,
   parseBackgrounded,
   parseTopics,
   transcriptPath,
 } from '../hooks/forks'
 
 const NOW = Date.parse('2026-11-04T12:00:00Z')
+const PARENT: ParentLink = { sessionId: '6bedcd55-2c20-4ec8-8baa-6b95beee6121', name: 'sidequest fork session metadata' }
 
 const fork = (over: Partial<Fork>): Fork => ({
   id: 'abc123',
@@ -169,8 +174,13 @@ describe('footer label', () => {
   })
 })
 
-const mountFooter = async (...[$, on, forks]: [...Parameters<TestBody>, Fork[]]) => {
-  on('state.get', (_, e) => ({ value: { value: { shape: 'forks-1', value: e.key === 'forks' ? forks : [] }, version: 1 } }))
+const mountFooter = async (...[$, on, forks, parent]: [...Parameters<TestBody>, Fork[], ParentLink?]) => {
+  on('state.get', (_, e) => ({
+    value: {
+      value: e.key === 'parent' && parent ? { shape: 'parent-1', value: parent } : { shape: 'forks-1', value: e.key === 'forks' ? forks : [] },
+      version: 1,
+    },
+  }))
   // Stands for the engine and any plugin beneath: draws the labels it is handed, joined as the footer joins them.
   on('ui.render', { component: 'SessionMode' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -185,10 +195,55 @@ test('the footer keeps the other modes and adds the fork counts last', async ($,
   await ui.unmount()
 })
 
+test('a fork names its parent in the footer, before its own fork counts', async ($, on) => {
+  const ui = await mountFooter($, on, [fork({})], PARENT)
+  expect(Boolean(await ui.find({ type: 'Text', text: '[focus & ⑂ from sidequest fork session metadata & ⑂ 1 running]' }))).toBe(true)
+  await ui.unmount()
+})
+
 test('with no live fork the footer is passed on untouched', async ($, on) => {
   const ui = await mountFooter($, on, [fork({ state: 'gone' })])
   expect(Boolean(await ui.find({ type: 'Text', text: '[focus]' }))).toBe(true)
   await ui.unmount()
+})
+
+describe('parent link', () => {
+  test('a fork prompt names its parent, and reads back as it', () => {
+    expect(parentOf(forkPrompt({ title: 'NAT cost', prompt: 'Dig into NAT.' }, PARENT))).toEqual(PARENT)
+  })
+  test('a fork prompt from before the link names no parent', () => {
+    expect(parentOf(fork({}).prompt)).toBe(undefined)
+  })
+  test('an ordinary prompt names no parent', () => {
+    expect(parentOf('what about NAT?')).toBe(undefined)
+  })
+  test('a parent name drops the fork mark and double quotes', () => {
+    expect(parentName('⑂ Cache "eviction" plan', PARENT.sessionId)).toBe("Cache 'eviction' plan")
+  })
+  test('a session with no name goes by its short id', () => {
+    expect(parentName(undefined, PARENT.sessionId)).toBe('6bedcd55')
+  })
+  test('the footer label', () => {
+    expect(parentLabel(PARENT)).toBe('⑂ from sidequest fork session metadata')
+  })
+})
+
+test('the prompt that starts a fork keeps its parent, for the session and for a resume', async ($, on) => {
+  const writes: string[] = []
+  on('state.get', () => ({ value: { value: { shape: 'none', value: [] }, version: 1 } }))
+  on('state.set', (_, e) => {
+    writes.push(`state ${e.key}`)
+    return { value: { isSet: true, version: 2 } }
+  })
+  on('store.set', (_, e) => {
+    writes.push(`store ${e.key}`)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: 'child-session' }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  const text = forkPrompt({ title: 'NAT cost', prompt: 'Dig into NAT.' }, PARENT)
+  expect((await $.prompt.submit({ wait: false, origin: { kind: 'composer' }, text })).text).toBe(text)
+  expect(writes.join()).toBe('state parent,store parent:child-session')
 })
 
 describe('harvest excerpt', () => {

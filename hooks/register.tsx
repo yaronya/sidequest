@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Fork, Topic } from '../types'
+import type { Fork, ParentLink, Topic } from '../types'
 import {
   type Agent,
   applyAgents,
@@ -15,6 +15,10 @@ import {
   harvestRequest,
   nextPage,
   pageOf,
+  parentKey,
+  parentLabel,
+  parentName,
+  parentOf,
   parseBackgrounded,
   parseTopics,
   titleRequest,
@@ -31,6 +35,7 @@ const TRANSCRIPT_TAIL_BYTES = '3000000'
 const topicsAtom = atom({ plugin: 'sidequest', key: 'topics' } as const, [], { shape: 'topics-1' })
 const offsetAtom = atom({ plugin: 'sidequest', key: 'offset' } as const, 0, { shape: 'offset-1' })
 const forksAtom = atom({ plugin: 'sidequest', key: 'forks' } as const, [], { shape: 'forks-1' })
+const parentAtom = atom({ plugin: 'sidequest', key: 'parent' } as const, null, { shape: 'parent-1' })
 
 const firstLine = (text: string) => text.trim().split('\n')[0] ?? ''
 
@@ -46,6 +51,19 @@ async function saveForks($: EngineInterface, forks: Fork[]): Promise<void> {
 async function loadForks($: EngineInterface): Promise<void> {
   const saved = await $.store.get(await storeKey($))
   if (Array.isArray(saved)) await update($, forksAtom, () => saved as Fork[])
+}
+
+async function loadParent($: EngineInterface): Promise<void> {
+  const saved = await $.store.get(parentKey(await $.session.id()))
+  if (saved) await update($, parentAtom, () => saved as ParentLink)
+}
+
+// A fork learns its parent from the prompt that started it, and stores it for a resume.
+async function noteParent($: EngineInterface, text: string): Promise<void> {
+  const parent = parentOf(text)
+  if (!parent || (await read($, parentAtom))) return
+  await update($, parentAtom, () => parent)
+  await $.store.set(parentKey(await $.session.id()), parent)
 }
 
 async function listAgents($: EngineInterface): Promise<Agent[]> {
@@ -72,7 +90,8 @@ async function forkTopic($: EngineInterface, topic: Topic): Promise<string> {
   const cwd = await $.session.cwd()
   const model = await $.session.model()
   const name = forkName(topic.title, (await read($, forksAtom)).map(fork => fork.name))
-  const prompt = forkPrompt(topic)
+  const self = (await listAgents($)).find(agent => agent.sessionId === sessionId)
+  const prompt = forkPrompt(topic, { sessionId, name: parentName(self?.name, sessionId) })
   const argv = ['claude', '-r', sessionId, '--fork-session', '--bg', '-n', name]
   if (/^[\w.[\]-]+$/.test(model)) argv.push('--model', model)
 
@@ -230,6 +249,7 @@ export const register: Register = on => {
     // An earlier version pinned the counts with $.ui.status, which outlives a reload.
     $.ui.status(undefined)
     await loadForks($)
+    await loadParent($)
     $.clock.every(POLL_MS, () => void poll($))
     return started
   })
@@ -241,6 +261,7 @@ export const register: Register = on => {
   // Band hotkeys need the band focused, so the keys also work sent as a prompt.
   on('prompt.submit', async ($, e, next) => {
     if (e.command) return next(e)
+    await noteParent($, e.text)
     const handled = await bandKey($, e.text)
     return handled ? { drop: handled } : next(e)
   }).catch(($, e, next) => next(e))
@@ -254,8 +275,11 @@ export const register: Register = on => {
   // The footer's mode labels compose: each plugin adds its own and passes the list on. The hint line
   // beside them is often redrawn whole by another mod (a PR status line), so the counts stay out of it.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    const label = forksLabel(await read($, forksAtom))
-    return next(label ? { ...e, props: { ...e.props, modes: [...e.props.modes, label] } } : e)
+    const parent = await read($, parentAtom)
+    const labels = [parent ? parentLabel(parent) : undefined, forksLabel(await read($, forksAtom))].filter(
+      (label): label is string => Boolean(label),
+    )
+    return next(labels.length > 0 ? { ...e, props: { ...e.props, modes: [...e.props.modes, ...labels] } } : e)
   })
 
   on('command.run', { command: 'questlog' }, async $ => {
