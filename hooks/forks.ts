@@ -1,4 +1,4 @@
-import type { Fork, ForkState, Topic } from '../types'
+import type { Fork, ForkState, ParentLink, Topic } from '../types'
 
 export const MAX_TOPICS = 30
 // One band page: the number keys 1-9.
@@ -89,8 +89,26 @@ export function parseTopics(reply: string): Topic[] {
     .slice(0, MAX_TOPICS)
 }
 
-export const forkPrompt = (topic: Topic) =>
-  `Fork from the parent session: deep dive on this one topic only, "${topic.title}". ${topic.prompt}\n\nThe parent session carries on with the other threads, so stay on this one.`
+// Opens with the parent's id and name: the fork reads its parent back from there (parentOf).
+export const forkPrompt = (topic: Topic, parent: ParentLink) =>
+  `Fork of session ${parent.sessionId} ("${parent.name}"): deep dive on this one topic only, "${topic.title}". ${topic.prompt}\n\nThe parent session carries on with the other threads, so stay on this one.`
+
+const FORK_OF = /^Fork of session ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \("([^"\n]*)"\):/
+
+// The parent a fork prompt names; undefined for any other prompt.
+export function parentOf(prompt: string): ParentLink | undefined {
+  const match = prompt.match(FORK_OF)
+  return match?.[1] ? { sessionId: match[1], name: match[2] || match[1].slice(0, 8) } : undefined
+}
+
+// A session's name made fit for the fork prompt's quotes and the footer: no fork mark, no double quote, one short line.
+export const parentName = (name: string | undefined, sessionId: string) =>
+  cleanTitle((name ?? '').replace(new RegExp(`^${FORK_MARK}\\s*`), '').replace(/"/g, "'")) || sessionId.slice(0, 8)
+
+// A fork keeps its parent under its own session id, so a resume finds it again.
+export const parentKey = (sessionId: string) => `parent:${sessionId}`
+
+export const parentLabel = (parent: ParentLink) => `${FORK_MARK} from ${parent.name}`
 
 // `/dig <title>: <prompt>` names the fork itself; with no short title before `: `, the title is left to the model.
 export function digTopic(text: string): { prompt: string; title?: string } | undefined {
